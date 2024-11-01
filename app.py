@@ -120,3 +120,11 @@ if __name__ == "__main__":
 # Fast autocomplete
 # Personalization layer
 # ES8 client upgrade
+
+
+# --- feat: add category browse to API v1 ---
+"""Module for related products in product-search."""
+import logging
+import time
+from functools import lru_cache
+from typing import Optional, Dict, List
