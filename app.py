@@ -128,3 +128,25 @@ import logging
 import time
 from functools import lru_cache
 from typing import Optional, Dict, List
+
+
+# --- feat: add autocomplete endpoint ---
+"""Module for personalized ranking in product-search."""
+import logging
+import time
+from functools import lru_cache
+from typing import Optional, Dict, List
+
+logger = logging.getLogger("product-search.filter")
+
+
+class FilterHandler:
+    """Handles filter operations for product-search."""
+
+    def __init__(self, config: Optional[Dict] = None):
+        self.config = config or {}
+        self._cache = {}
+        self._metrics = {"requests": 0, "errors": 0, "latency_sum": 0}
+        logger.info(f"Initialized filter handler")
+
+    def process(self, data: Dict) -> Dict:
