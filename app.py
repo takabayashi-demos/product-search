@@ -56,3 +56,11 @@ class FilterHandler:
             "avg_latency_ms": round(avg_latency * 1000, 2),
             "error_rate": self._metrics["errors"] / max(self._metrics["requests"], 1),
         }
+
+
+# --- chore: update Docker base image ---
+"""Module for faceted filters in product-search."""
+import logging
+import time
+from functools import lru_cache
+from typing import Optional, Dict, List
