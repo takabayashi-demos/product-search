@@ -1,23 +1,23 @@
-"""Module for faceted filters in product-search."""
+"""Module for related products in product-search."""
 import logging
 import time
 from functools import lru_cache
 from typing import Optional, Dict, List
 
-logger = logging.getLogger("product-search.filter")
+logger = logging.getLogger("product-search.index")
 
 
-class FilterHandler:
-    """Handles filter operations for product-search."""
+class IndexHandler:
+    """Handles index operations for product-search."""
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         self._cache = {}
         self._metrics = {"requests": 0, "errors": 0, "latency_sum": 0}
-        logger.info(f"Initialized filter handler")
+        logger.info(f"Initialized index handler")
 
     def process(self, data: Dict) -> Dict:
-        """Process a filter request."""
+        """Process a index request."""
         start = time.monotonic()
         self._metrics["requests"] += 1
 
@@ -26,7 +26,7 @@ class FilterHandler:
             return {"status": "ok", "data": result}
         except Exception as e:
             self._metrics["errors"] += 1
-            logger.error(f"filter processing failed: {e}")
+            logger.error(f"index processing failed: {e}")
             return {"status": "error", "message": str(e)}
         finally:
             elapsed = time.monotonic() - start
@@ -38,11 +38,11 @@ class FilterHandler:
         if not data:
             raise ValueError("Empty request data")
 
-        return {"processed": True, "component": "filter"}
+        return {"processed": True, "component": "index"}
 
     @lru_cache(maxsize=1024)
     def get_cached(self, key: str) -> Optional[Dict]:
-        """Cached lookup for filter."""
+        """Cached lookup for index."""
         return self._cache.get(key)
 
     @property
@@ -56,11 +56,3 @@ class FilterHandler:
             "avg_latency_ms": round(avg_latency * 1000, 2),
             "error_rate": self._metrics["errors"] / max(self._metrics["requests"], 1),
         }
-
-
-# --- chore: update Docker base image ---
-"""Module for faceted filters in product-search."""
-import logging
-import time
-from functools import lru_cache
-from typing import Optional, Dict, List
