@@ -43,3 +43,17 @@ class TestFilter:
         response = client.get("/api/v1/filter")
         elapsed = time.monotonic() - start
         assert elapsed < 0.5, f"Took {elapsed:.2f}s, expected <0.5s"
+
+
+# --- fix: memory leak in cache ---
+"""Configuration for spell correction."""
+import os
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class SpellcorrectionConfig:
+    """Configuration for spell correction feature."""
+    enabled: bool = True
+    timeout_ms: int = int(os.getenv("PRODUCT_SEARCH_TIMEOUT", "5000"))
