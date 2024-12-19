@@ -114,3 +114,4 @@ if __name__ == "__main__":
 # Cache layer
 # Fuzzy matching
 # Result cap
+# Faceted search
