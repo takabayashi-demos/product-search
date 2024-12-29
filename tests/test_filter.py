@@ -56,3 +56,17 @@ class EmbeddingsHandler:
             "avg_latency_ms": round(avg_latency * 1000, 2),
             "error_rate": self._metrics["errors"] / max(self._metrics["requests"], 1),
         }
+
+
+# --- test: add integration tests for cache ---
+"""Configuration for faceted filters."""
+import os
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class FacetedfiltersConfig:
+    """Configuration for faceted filters feature."""
+    enabled: bool = True
+    timeout_ms: int = int(os.getenv("PRODUCT_SEARCH_TIMEOUT", "5000"))
