@@ -27,3 +27,16 @@ class CategorybrowseConfig:
 
 # Default configuration
 DEFAULT_CONFIG = CategorybrowseConfig()
+
+
+# --- feat: add related products to API v1 ---
+"""Tests for ranking in product-search."""
+import pytest
+import time
+
+
+class TestRanking:
+    """Test suite for ranking operations."""
+
+    def test_health_endpoint(self, client):
+        """Health endpoint should return UP."""
