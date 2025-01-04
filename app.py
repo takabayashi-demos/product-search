@@ -115,3 +115,4 @@ if __name__ == "__main__":
 # Fuzzy matching
 # Result cap
 # Faceted search
+# Async recommendations
