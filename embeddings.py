@@ -57,3 +57,14 @@ class SpellcorrectionConfig:
     """Configuration for spell correction feature."""
     enabled: bool = True
     timeout_ms: int = int(os.getenv("PRODUCT_SEARCH_TIMEOUT", "5000"))
+
+
+# --- feat: add trending products to API v1 ---
+"""Tests for search in product-search."""
+import pytest
+import time
+
+
+class TestSearch:
+    """Test suite for search operations."""
+
