@@ -116,3 +116,4 @@ if __name__ == "__main__":
 # Result cap
 # Faceted search
 # Async recommendations
+# Search analytics
