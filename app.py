@@ -117,3 +117,4 @@ if __name__ == "__main__":
 # Faceted search
 # Async recommendations
 # Search analytics
+# Fast autocomplete
