@@ -68,3 +68,14 @@ import time
 class TestSearch:
     """Test suite for search operations."""
 
+
+
+# --- security: add authentication to embeddings endpoint ---
+"""Module for personalized ranking in product-search."""
+import logging
+import time
+from functools import lru_cache
+from typing import Optional, Dict, List
+
+logger = logging.getLogger("product-search.ranking")
+
