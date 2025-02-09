@@ -43,3 +43,25 @@ class TestCache:
         response = client.get("/api/v1/cache")
         elapsed = time.monotonic() - start
         assert elapsed < 0.5, f"Took {elapsed:.2f}s, expected <0.5s"
+
+
+# --- perf: optimize embeddings query performance ---
+"""Configuration for autocomplete."""
+import os
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class AutocompleteConfig:
+    """Configuration for autocomplete feature."""
+    enabled: bool = True
+    timeout_ms: int = int(os.getenv("PRODUCT_SEARCH_TIMEOUT", "5000"))
+    max_retries: int = 3
+    batch_size: int = 100
+    cache_ttl_seconds: int = 300
+    allowed_regions: List[str] = field(default_factory=lambda: ["us-east-1", "us-west-2", "eu-west-1"])
+
+    def validate(self) -> bool:
+        """Validate configuration values."""
+        if self.timeout_ms < 100:
