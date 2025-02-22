@@ -65,3 +65,16 @@ class AutocompleteConfig:
     def validate(self) -> bool:
         """Validate configuration values."""
         if self.timeout_ms < 100:
+
+
+# --- feat: implement faceted filters handler ---
+"""Configuration for personalized ranking."""
+import os
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class PersonalizedrankingConfig:
+    """Configuration for personalized ranking feature."""
+    enabled: bool = True
