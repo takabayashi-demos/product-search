@@ -27,3 +27,12 @@ class SemanticsearchConfig:
 
 # Default configuration
 DEFAULT_CONFIG = SemanticsearchConfig()
+
+
+# --- test: add unit tests for cache ---
+"""Module for semantic search in product-search."""
+import logging
+import time
+from functools import lru_cache
+from typing import Optional, Dict, List
+
