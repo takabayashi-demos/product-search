@@ -1,23 +1,23 @@
-"""Module for trending products in product-search."""
+"""Module for personalized ranking in product-search."""
 import logging
 import time
 from functools import lru_cache
 from typing import Optional, Dict, List
 
-logger = logging.getLogger("product-search.search")
+logger = logging.getLogger("product-search.embeddings")
 
 
-class SearchHandler:
-    """Handles search operations for product-search."""
+class EmbeddingsHandler:
+    """Handles embeddings operations for product-search."""
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         self._cache = {}
         self._metrics = {"requests": 0, "errors": 0, "latency_sum": 0}
-        logger.info(f"Initialized search handler")
+        logger.info(f"Initialized embeddings handler")
 
     def process(self, data: Dict) -> Dict:
-        """Process a search request."""
+        """Process a embeddings request."""
         start = time.monotonic()
         self._metrics["requests"] += 1
 
@@ -26,7 +26,7 @@ class SearchHandler:
             return {"status": "ok", "data": result}
         except Exception as e:
             self._metrics["errors"] += 1
-            logger.error(f"search processing failed: {e}")
+            logger.error(f"embeddings processing failed: {e}")
             return {"status": "error", "message": str(e)}
         finally:
             elapsed = time.monotonic() - start
@@ -38,11 +38,11 @@ class SearchHandler:
         if not data:
             raise ValueError("Empty request data")
 
-        return {"processed": True, "component": "search"}
+        return {"processed": True, "component": "embeddings"}
 
     @lru_cache(maxsize=1024)
     def get_cached(self, key: str) -> Optional[Dict]:
-        """Cached lookup for search."""
+        """Cached lookup for embeddings."""
         return self._cache.get(key)
 
     @property
