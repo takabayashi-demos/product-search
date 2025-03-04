@@ -56,3 +56,20 @@ class EmbeddingsHandler:
             "avg_latency_ms": round(avg_latency * 1000, 2),
             "error_rate": self._metrics["errors"] / max(self._metrics["requests"], 1),
         }
+
+
+# --- docs: add architecture diagram ---
+"""Module for personalized ranking in product-search."""
+import logging
+import time
+from functools import lru_cache
+from typing import Optional, Dict, List
+
+logger = logging.getLogger("product-search.filter")
+
+
+class FilterHandler:
+    """Handles filter operations for product-search."""
+
+    def __init__(self, config: Optional[Dict] = None):
+        self.config = config or {}
