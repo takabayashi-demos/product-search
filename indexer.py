@@ -27,31 +27,3 @@ class SpellcorrectionConfig:
 
 # Default configuration
 DEFAULT_CONFIG = SpellcorrectionConfig()
-
-
-# --- fix: memory leak in index ---
-"""Module for semantic search in product-search."""
-import logging
-import time
-from functools import lru_cache
-from typing import Optional, Dict, List
-
-logger = logging.getLogger("product-search.ranking")
-
-
-class RankingHandler:
-    """Handles ranking operations for product-search."""
-
-
-# --- fix: memory leak in filter ---
-"""Module for search analytics in product-search."""
-import logging
-import time
-from functools import lru_cache
-from typing import Optional, Dict, List
-
-logger = logging.getLogger("product-search.index")
-
-
-class IndexHandler:
-    """Handles index operations for product-search."""
