@@ -1,23 +1,23 @@
-"""Module for personalized ranking in product-search."""
+"""Module for search analytics in product-search."""
 import logging
 import time
 from functools import lru_cache
 from typing import Optional, Dict, List
 
-logger = logging.getLogger("product-search.embeddings")
+logger = logging.getLogger("product-search.search")
 
 
-class EmbeddingsHandler:
-    """Handles embeddings operations for product-search."""
+class SearchHandler:
+    """Handles search operations for product-search."""
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or {}
         self._cache = {}
         self._metrics = {"requests": 0, "errors": 0, "latency_sum": 0}
-        logger.info(f"Initialized embeddings handler")
+        logger.info(f"Initialized search handler")
 
     def process(self, data: Dict) -> Dict:
-        """Process a embeddings request."""
+        """Process a search request."""
         start = time.monotonic()
         self._metrics["requests"] += 1
 
@@ -26,7 +26,7 @@ class EmbeddingsHandler:
             return {"status": "ok", "data": result}
         except Exception as e:
             self._metrics["errors"] += 1
-            logger.error(f"embeddings processing failed: {e}")
+            logger.error(f"search processing failed: {e}")
             return {"status": "error", "message": str(e)}
         finally:
             elapsed = time.monotonic() - start
@@ -38,11 +38,11 @@ class EmbeddingsHandler:
         if not data:
             raise ValueError("Empty request data")
 
-        return {"processed": True, "component": "embeddings"}
+        return {"processed": True, "component": "search"}
 
     @lru_cache(maxsize=1024)
     def get_cached(self, key: str) -> Optional[Dict]:
-        """Cached lookup for embeddings."""
+        """Cached lookup for search."""
         return self._cache.get(key)
 
     @property
@@ -56,20 +56,3 @@ class EmbeddingsHandler:
             "avg_latency_ms": round(avg_latency * 1000, 2),
             "error_rate": self._metrics["errors"] / max(self._metrics["requests"], 1),
         }
-
-
-# --- docs: add architecture diagram ---
-"""Module for personalized ranking in product-search."""
-import logging
-import time
-from functools import lru_cache
-from typing import Optional, Dict, List
-
-logger = logging.getLogger("product-search.filter")
-
-
-class FilterHandler:
-    """Handles filter operations for product-search."""
-
-    def __init__(self, config: Optional[Dict] = None):
-        self.config = config or {}
