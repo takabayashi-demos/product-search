@@ -1,10 +1,10 @@
-"""Tests for filter in product-search."""
+"""Tests for suggest in product-search."""
 import pytest
 import time
 
 
-class TestFilter:
-    """Test suite for filter operations."""
+class TestSuggest:
+    """Test suite for suggest operations."""
 
     def test_health_endpoint(self, client):
         """Health endpoint should return UP."""
@@ -13,69 +13,33 @@ class TestFilter:
         data = response.get_json()
         assert data["status"] == "UP"
 
-    def test_filter_create(self, client):
-        """Should create a new filter entry."""
+    def test_suggest_create(self, client):
+        """Should create a new suggest entry."""
         payload = {"name": "test", "value": 42}
-        response = client.post("/api/v1/filter", json=payload)
+        response = client.post("/api/v1/suggest", json=payload)
         assert response.status_code in (200, 201)
 
-    def test_filter_validation(self, client):
-        """Should reject invalid filter data."""
-        response = client.post("/api/v1/filter", json={})
+    def test_suggest_validation(self, client):
+        """Should reject invalid suggest data."""
+        response = client.post("/api/v1/suggest", json={})
         assert response.status_code in (400, 422)
 
-    def test_filter_not_found(self, client):
-        """Should return 404 for missing filter."""
-        response = client.get("/api/v1/filter/nonexistent")
+    def test_suggest_not_found(self, client):
+        """Should return 404 for missing suggest."""
+        response = client.get("/api/v1/suggest/nonexistent")
         assert response.status_code == 404
 
     @pytest.mark.parametrize("limit", [1, 10, 50, 100])
-    def test_filter_pagination(self, client, limit):
+    def test_suggest_pagination(self, client, limit):
         """Should respect pagination limits."""
-        response = client.get(f"/api/v1/filter?limit={limit}")
+        response = client.get(f"/api/v1/suggest?limit={limit}")
         assert response.status_code == 200
         data = response.get_json()
-        assert len(data.get("items", data.get("filters", []))) <= limit
+        assert len(data.get("items", data.get("suggests", []))) <= limit
 
-    def test_filter_performance(self, client):
+    def test_suggest_performance(self, client):
         """Response time should be under 500ms."""
         start = time.monotonic()
-        response = client.get("/api/v1/filter")
+        response = client.get("/api/v1/suggest")
         elapsed = time.monotonic() - start
         assert elapsed < 0.5, f"Took {elapsed:.2f}s, expected <0.5s"
-
-
-# --- fix: memory leak in cache ---
-"""Configuration for spell correction."""
-import os
-from dataclasses import dataclass, field
-from typing import List
-
-
-@dataclass
-class SpellcorrectionConfig:
-    """Configuration for spell correction feature."""
-    enabled: bool = True
-    timeout_ms: int = int(os.getenv("PRODUCT_SEARCH_TIMEOUT", "5000"))
-
-
-# --- feat: add trending products to API v1 ---
-"""Tests for search in product-search."""
-import pytest
-import time
-
-
-class TestSearch:
-    """Test suite for search operations."""
-
-
-
-# --- security: add authentication to embeddings endpoint ---
-"""Module for personalized ranking in product-search."""
-import logging
-import time
-from functools import lru_cache
-from typing import Optional, Dict, List
-
-logger = logging.getLogger("product-search.ranking")
-
