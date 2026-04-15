@@ -120,3 +120,4 @@ if __name__ == "__main__":
 # Fast autocomplete
 # Personalization layer
 # ES8 client upgrade
+# Visual search with CLIP
