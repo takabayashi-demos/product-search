@@ -1,6 +1,9 @@
-"""Tests for input validation and query sanitization."""
+"""Tests for input validation, query sanitization, and rate limiting."""
+import time
+from unittest.mock import patch
+
 import pytest
-from app import sanitize_query, validate_search_params, MAX_QUERY_LENGTH
+from app import sanitize_query, validate_search_params, RateLimiter, MAX_QUERY_LENGTH
 
 
 class FakeArgs(dict):
@@ -8,6 +11,10 @@ class FakeArgs(dict):
     def get(self, key, default=None):
         return super().get(key, default)
 
+
+# ---------------------------------------------------------------------------
+# sanitize_query
+# ---------------------------------------------------------------------------
 
 class TestSanitizeQuery:
     def test_plain_text_unchanged(self):
@@ -38,6 +45,10 @@ class TestSanitizeQuery:
         result = sanitize_query("/regex/")
         assert result == "\\/regex\\/"
 
+
+# ---------------------------------------------------------------------------
+# validate_search_params
+# ---------------------------------------------------------------------------
 
 class TestValidateSearchParams:
     def test_missing_query(self):
@@ -88,3 +99,46 @@ class TestValidateSearchParams:
     def test_offset_non_integer(self):
         err, _ = validate_search_params(FakeArgs({"q": "test", "offset": "foo"}))
         assert "integer" in err
+
+
+# ---------------------------------------------------------------------------
+# RateLimiter
+# ---------------------------------------------------------------------------
+
+class TestRateLimiter:
+    def test_allows_under_limit(self):
+        rl = RateLimiter(max_requests=5, window=60)
+        for _ in range(5):
+            allowed, _ = rl.is_allowed("10.0.0.1")
+            assert allowed
+
+    def test_blocks_over_limit(self):
+        rl = RateLimiter(max_requests=3, window=60)
+        for _ in range(3):
+            rl.is_allowed("10.0.0.1")
+        allowed, retry_after = rl.is_allowed("10.0.0.1")
+        assert not allowed
+        assert retry_after > 0
+
+    def test_separate_keys_independent(self):
+        rl = RateLimiter(max_requests=2, window=60)
+        rl.is_allowed("10.0.0.1")
+        rl.is_allowed("10.0.0.1")
+        allowed, _ = rl.is_allowed("10.0.0.2")
+        assert allowed
+
+    def test_window_expiry(self):
+        rl = RateLimiter(max_requests=1, window=1)
+        rl.is_allowed("10.0.0.1")
+        allowed, _ = rl.is_allowed("10.0.0.1")
+        assert not allowed
+        time.sleep(1.1)
+        allowed, _ = rl.is_allowed("10.0.0.1")
+        assert allowed
+
+    def test_reset_clears_state(self):
+        rl = RateLimiter(max_requests=1, window=60)
+        rl.is_allowed("10.0.0.1")
+        rl.reset()
+        allowed, _ = rl.is_allowed("10.0.0.1")
+        assert allowed

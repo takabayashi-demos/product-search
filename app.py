@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 MAX_QUERY_LENGTH = int(os.getenv("MAX_QUERY_LENGTH", "200"))
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 20
+RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "60"))
+RATE_LIMIT_WINDOW = 60  # seconds
 
 # Characters that have special meaning in Elasticsearch query_string syntax.
 # They must be escaped with a backslash before being passed into a query.
@@ -55,6 +57,40 @@ def validate_search_params(args) -> Tuple[Optional[str], Optional[dict]]:
         return "Parameter 'offset' must be >= 0", None
 
     return None, {"q": q, "limit": limit, "offset": offset}
+
+
+class RateLimiter:
+    """Sliding-window rate limiter keyed by client IP."""
+
+    def __init__(self, max_requests: int = RATE_LIMIT_RPM, window: int = RATE_LIMIT_WINDOW):
+        self._max_requests = max_requests
+        self._window = window
+        self._requests: Dict[str, List[float]] = {}
+        self._lock = Lock()
+
+    def is_allowed(self, key: str) -> Tuple[bool, int]:
+        """Check if a request is allowed.
+
+        Returns (allowed, retry_after_seconds).
+        """
+        now = time.monotonic()
+        cutoff = now - self._window
+        with self._lock:
+            timestamps = self._requests.get(key, [])
+            # Prune expired entries
+            timestamps = [t for t in timestamps if t > cutoff]
+            if len(timestamps) >= self._max_requests:
+                oldest = timestamps[0]
+                retry_after = int(oldest + self._window - now) + 1
+                self._requests[key] = timestamps
+                return False, retry_after
+            timestamps.append(now)
+            self._requests[key] = timestamps
+            return True, 0
+
+    def reset(self):
+        with self._lock:
+            self._requests.clear()
 
 
 @dataclass
@@ -178,7 +214,17 @@ cache = QueryCache(
     ttl_seconds=int(os.getenv("CACHE_TTL", "60")),
 )
 
+rate_limiter = RateLimiter()
+
 app = Flask(__name__)
+
+
+def _get_client_ip() -> str:
+    """Extract client IP, respecting X-Forwarded-For behind a trusted proxy."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
 
 
 def _build_es_query(query: str, limit: int, offset: int) -> dict:
@@ -216,6 +262,14 @@ def _parse_hits(response: dict) -> List[dict]:
 
 @app.route("/search")
 def search():
+    client_ip = _get_client_ip()
+    allowed, retry_after = rate_limiter.is_allowed(client_ip)
+    if not allowed:
+        resp = jsonify({"error": "Rate limit exceeded", "retry_after": retry_after})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
+
     error, params = validate_search_params(request.args)
     if error:
         return jsonify({"error": error}), 400
