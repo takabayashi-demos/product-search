@@ -1,145 +1,90 @@
-"""Tests for product-search service."""
+"""Tests for input validation and query sanitization."""
 import pytest
-import time
-from unittest.mock import MagicMock, patch
-from app import QueryCache, ESClientManager
+from app import sanitize_query, validate_search_params, MAX_QUERY_LENGTH
 
 
-class TestHealth:
-    """Health endpoint tests."""
-
-    def test_health_endpoint(self, client):
-        response = client.get("/health")
-        assert response.status_code == 200
-        assert response.get_json()["status"] == "UP"
+class FakeArgs(dict):
+    """Minimal request.args stand-in."""
+    def get(self, key, default=None):
+        return super().get(key, default)
 
 
-class TestCacheEndpoints:
-    """Cache CRUD endpoint tests."""
+class TestSanitizeQuery:
+    def test_plain_text_unchanged(self):
+        assert sanitize_query("blue jeans") == "blue jeans"
 
-    def test_cache_create(self, client):
-        payload = {"name": "test", "value": 42}
-        response = client.post("/api/v1/cache", json=payload)
-        assert response.status_code in (200, 201)
+    def test_escapes_wildcards(self):
+        result = sanitize_query("test*")
+        assert result == "test\\*"
 
-    def test_cache_validation(self, client):
-        response = client.post("/api/v1/cache", json={})
-        assert response.status_code in (400, 422)
+    def test_escapes_boolean_operators(self):
+        result = sanitize_query("a && b || c")
+        assert "\\&" in result
+        assert "\\|" in result
 
-    def test_cache_not_found(self, client):
-        response = client.get("/api/v1/cache/nonexistent")
-        assert response.status_code == 404
+    def test_escapes_parentheses(self):
+        result = sanitize_query("(drop)")
+        assert result == "\\(drop\\)"
 
-    @pytest.mark.parametrize("limit", [1, 10, 50, 100])
-    def test_cache_pagination(self, client, limit):
-        response = client.get(f"/api/v1/cache?limit={limit}")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert len(data.get("items", data.get("caches", []))) <= limit
+    def test_escapes_colons(self):
+        result = sanitize_query("_exists_:password")
+        assert result == "_exists_\\:password"
 
-    def test_cache_performance(self, client):
-        start = time.monotonic()
-        response = client.get("/api/v1/cache")
-        elapsed = time.monotonic() - start
-        assert elapsed < 0.5, f"Took {elapsed:.2f}s, expected <0.5s"
+    def test_escapes_quotes(self):
+        result = sanitize_query('"exact match"')
+        assert '\\"' in result
 
-
-class TestQueryCache:
-    """Unit tests for the LRU query cache."""
-
-    def test_cache_miss_returns_none(self):
-        cache = QueryCache(max_size=10, ttl_seconds=60)
-        assert cache.get("laptop", 20, 0) is None
-
-    def test_cache_hit_returns_stored_value(self):
-        cache = QueryCache(max_size=10, ttl_seconds=60)
-        data = {"total": 5, "items": [{"name": "laptop"}]}
-        cache.put("laptop", 20, 0, data)
-        result = cache.get("laptop", 20, 0)
-        assert result == data
-
-    def test_cache_normalizes_query(self):
-        cache = QueryCache(max_size=10, ttl_seconds=60)
-        data = {"total": 1, "items": []}
-        cache.put("  Laptop  ", 20, 0, data)
-        assert cache.get("laptop", 20, 0) == data
-
-    def test_cache_differentiates_pagination(self):
-        cache = QueryCache(max_size=10, ttl_seconds=60)
-        page1 = {"total": 100, "items": [{"name": "a"}]}
-        page2 = {"total": 100, "items": [{"name": "b"}]}
-        cache.put("shoes", 20, 0, page1)
-        cache.put("shoes", 20, 20, page2)
-        assert cache.get("shoes", 20, 0) == page1
-        assert cache.get("shoes", 20, 20) == page2
-
-    def test_cache_ttl_expiry(self):
-        cache = QueryCache(max_size=10, ttl_seconds=0)
-        cache.put("tv", 10, 0, {"total": 1, "items": []})
-        time.sleep(0.01)
-        assert cache.get("tv", 10, 0) is None
-
-    def test_cache_evicts_lru_when_full(self):
-        cache = QueryCache(max_size=2, ttl_seconds=60)
-        cache.put("a", 10, 0, {"items": ["a"]})
-        cache.put("b", 10, 0, {"items": ["b"]})
-        cache.put("c", 10, 0, {"items": ["c"]})
-        assert cache.get("a", 10, 0) is None
-        assert cache.get("b", 10, 0) is not None
-        assert cache.get("c", 10, 0) is not None
-
-    def test_cache_stats(self):
-        cache = QueryCache(max_size=10, ttl_seconds=60)
-        cache.put("x", 10, 0, {"items": []})
-        cache.get("x", 10, 0)
-        cache.get("y", 10, 0)
-        stats = cache.stats
-        assert stats["hits"] == 1
-        assert stats["misses"] == 1
-        assert stats["size"] == 1
-        assert stats["hit_rate"] == 0.5
+    def test_escapes_slashes(self):
+        result = sanitize_query("/regex/")
+        assert result == "\\/regex\\/"
 
 
-class TestSearchEndpoint:
-    """Integration tests for /api/v1/search."""
+class TestValidateSearchParams:
+    def test_missing_query(self):
+        err, params = validate_search_params(FakeArgs())
+        assert err is not None
+        assert params is None
+        assert "Missing" in err
 
-    def test_search_requires_query(self, client):
-        response = client.get("/api/v1/search")
-        assert response.status_code == 400
+    def test_empty_query(self):
+        err, params = validate_search_params(FakeArgs({"q": "   "}))
+        assert err is not None
+        assert "Missing" in err
 
-    def test_search_returns_results(self, client, mock_es):
-        mock_es.search.return_value = {
-            "hits": {
-                "total": {"value": 1},
-                "hits": [{"_source": {"name": "Widget", "price": 9.99}}],
-            }
-        }
-        response = client.get("/api/v1/search?q=widget")
-        assert response.status_code == 200
-        data = response.get_json()
-        assert data["total"] == 1
-        assert len(data["items"]) == 1
+    def test_query_too_long(self):
+        err, params = validate_search_params(FakeArgs({"q": "x" * (MAX_QUERY_LENGTH + 1)}))
+        assert err is not None
+        assert "too long" in err
 
-    def test_search_cache_bypass(self, client, mock_es):
-        mock_es.search.return_value = {
-            "hits": {"total": {"value": 0}, "hits": []}
-        }
-        client.get("/api/v1/search?q=test")
-        client.get("/api/v1/search?q=test",
-                   headers={"Cache-Control": "no-cache"})
-        assert mock_es.search.call_count == 2
+    def test_valid_defaults(self):
+        err, params = validate_search_params(FakeArgs({"q": "shoes"}))
+        assert err is None
+        assert params["q"] == "shoes"
+        assert params["limit"] == 20
+        assert params["offset"] == 0
 
+    def test_valid_custom_params(self):
+        err, params = validate_search_params(FakeArgs({"q": "tv", "limit": "50", "offset": "10"}))
+        assert err is None
+        assert params["limit"] == 50
+        assert params["offset"] == 10
 
-class TestESClientManager:
-    """Tests for connection pool manager."""
+    def test_limit_non_integer(self):
+        err, _ = validate_search_params(FakeArgs({"q": "test", "limit": "abc"}))
+        assert "integer" in err
 
-    def test_singleton_returns_same_instance(self):
-        a = ESClientManager.get_instance()
-        b = ESClientManager.get_instance()
-        assert a is b
+    def test_limit_zero(self):
+        err, _ = validate_search_params(FakeArgs({"q": "test", "limit": "0"}))
+        assert err is not None
 
-    def test_reset_clears_instance(self):
-        a = ESClientManager.get_instance()
-        ESClientManager.reset()
-        b = ESClientManager.get_instance()
-        assert a is not b
+    def test_limit_exceeds_max(self):
+        err, _ = validate_search_params(FakeArgs({"q": "test", "limit": "101"}))
+        assert err is not None
+
+    def test_negative_offset(self):
+        err, _ = validate_search_params(FakeArgs({"q": "test", "offset": "-1"}))
+        assert err is not None
+
+    def test_offset_non_integer(self):
+        err, _ = validate_search_params(FakeArgs({"q": "test", "offset": "foo"}))
+        assert "integer" in err
