@@ -1,5 +1,6 @@
 """Product search microservice with Elasticsearch integration."""
 import os
+import re
 import time
 import hashlib
 import json
@@ -13,6 +14,83 @@ from flask import Flask, jsonify, request
 from elasticsearch import Elasticsearch, helpers
 
 logger = logging.getLogger(__name__)
+
+MAX_QUERY_LENGTH = int(os.getenv("MAX_QUERY_LENGTH", "200"))
+MAX_LIMIT = 100
+DEFAULT_LIMIT = 20
+RATE_LIMIT_RPM = int(os.getenv("RATE_LIMIT_RPM", "60"))
+RATE_LIMIT_WINDOW = 60  # seconds
+
+# Characters that have special meaning in Elasticsearch query_string syntax.
+# They must be escaped with a backslash before being passed into a query.
+_ES_RESERVED_RE = re.compile(r'([+\-=&|><!(){}\[\]^"~*?:\\/])')
+
+
+def sanitize_query(raw: str) -> str:
+    """Escape Elasticsearch reserved characters in user input."""
+    return _ES_RESERVED_RE.sub(r"\\\1", raw)
+
+
+def validate_search_params(args) -> Tuple[Optional[str], Optional[dict]]:
+    """Validate and parse search parameters.
+
+    Returns (error_message, parsed_params).  Exactly one will be None.
+    """
+    q = args.get("q", "").strip()
+    if not q:
+        return "Missing required parameter: q", None
+    if len(q) > MAX_QUERY_LENGTH:
+        return f"Query too long (max {MAX_QUERY_LENGTH} characters)", None
+
+    try:
+        limit = int(args.get("limit", DEFAULT_LIMIT))
+    except (ValueError, TypeError):
+        return "Parameter 'limit' must be an integer", None
+    if limit < 1 or limit > MAX_LIMIT:
+        return f"Parameter 'limit' must be between 1 and {MAX_LIMIT}", None
+
+    try:
+        offset = int(args.get("offset", 0))
+    except (ValueError, TypeError):
+        return "Parameter 'offset' must be an integer", None
+    if offset < 0:
+        return "Parameter 'offset' must be >= 0", None
+
+    return None, {"q": q, "limit": limit, "offset": offset}
+
+
+class RateLimiter:
+    """Sliding-window rate limiter keyed by client IP."""
+
+    def __init__(self, max_requests: int = RATE_LIMIT_RPM, window: int = RATE_LIMIT_WINDOW):
+        self._max_requests = max_requests
+        self._window = window
+        self._requests: Dict[str, List[float]] = {}
+        self._lock = Lock()
+
+    def is_allowed(self, key: str) -> Tuple[bool, int]:
+        """Check if a request is allowed.
+
+        Returns (allowed, retry_after_seconds).
+        """
+        now = time.monotonic()
+        cutoff = now - self._window
+        with self._lock:
+            timestamps = self._requests.get(key, [])
+            # Prune expired entries
+            timestamps = [t for t in timestamps if t > cutoff]
+            if len(timestamps) >= self._max_requests:
+                oldest = timestamps[0]
+                retry_after = int(oldest + self._window - now) + 1
+                self._requests[key] = timestamps
+                return False, retry_after
+            timestamps.append(now)
+            self._requests[key] = timestamps
+            return True, 0
+
+    def reset(self):
+        with self._lock:
+            self._requests.clear()
 
 
 @dataclass
@@ -113,17 +191,9 @@ class QueryCache:
         with self._lock:
             if key in self._cache:
                 self._cache.move_to_end(key)
-                self._cache[key] = (time.monotonic(), value)
-            else:
-                if len(self._cache) >= self._max_size:
-                    self._cache.popitem(last=False)
-                self._cache[key] = (time.monotonic(), value)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()
-            self._hits = 0
-            self._misses = 0
+            self._cache[key] = (time.monotonic(), value)
+            while len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
 
     @property
     def stats(self) -> dict:
@@ -131,122 +201,113 @@ class QueryCache:
             total = self._hits + self._misses
             return {
                 "size": len(self._cache),
-                "max_size": self._max_size,
-                "ttl_seconds": self._ttl,
                 "hits": self._hits,
                 "misses": self._misses,
-                "hit_rate": round(self._hits / total, 4) if total > 0 else 0.0,
+                "hit_rate": round(self._hits / total, 4) if total else 0.0,
             }
 
 
-@dataclass
-class AutocompleteConfig:
-    """Configuration for autocomplete feature."""
-    enabled: bool = True
-    timeout_ms: int = int(os.getenv("PRODUCT_SEARCH_TIMEOUT", "5000"))
-    max_retries: int = 3
-    batch_size: int = 100
-    cache_ttl_seconds: int = 300
-    allowed_regions: List[str] = field(
-        default_factory=lambda: ["us-east-1", "us-west-2", "eu-west-1"]
-    )
+INDEX_NAME = os.getenv("ES_INDEX", "products")
 
-    def validate(self) -> bool:
-        """Validate configuration values."""
-        if self.timeout_ms < 100:
-            return False
-        if self.batch_size < 1:
-            return False
-        return True
-
-
-@dataclass
-class PersonalizedrankingConfig:
-    """Configuration for personalized ranking feature."""
-    enabled: bool = True
-
-
-_query_cache = QueryCache(
-    max_size=int(os.getenv("SEARCH_CACHE_MAX_SIZE", "2000")),
-    ttl_seconds=int(os.getenv("SEARCH_CACHE_TTL", "30")),
+cache = QueryCache(
+    max_size=int(os.getenv("CACHE_MAX_SIZE", "1000")),
+    ttl_seconds=int(os.getenv("CACHE_TTL", "60")),
 )
 
+rate_limiter = RateLimiter()
 
-def _get_es() -> Elasticsearch:
-    """Get the shared ES client from the pool manager."""
-    return ESClientManager.get_instance().client
+app = Flask(__name__)
 
 
-def create_app(es_config: Optional[ESPoolConfig] = None) -> Flask:
-    """Application factory."""
-    app = Flask(__name__)
+def _get_client_ip() -> str:
+    """Extract client IP, respecting X-Forwarded-For behind a trusted proxy."""
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "unknown"
 
-    ESClientManager.get_instance(es_config)
 
-    @app.route("/health")
-    def health():
-        return jsonify({"status": "UP"})
+def _build_es_query(query: str, limit: int, offset: int) -> dict:
+    safe_query = sanitize_query(query)
+    return {
+        "size": limit,
+        "from": offset,
+        "query": {
+            "multi_match": {
+                "query": safe_query,
+                "fields": ["name^3", "description", "category^2", "brand^2"],
+                "type": "best_fields",
+                "fuzziness": "AUTO",
+            }
+        },
+        "highlight": {
+            "fields": {"name": {}, "description": {}},
+            "pre_tags": ["<em>"],
+            "post_tags": ["</em>"],
+        },
+    }
 
-    @app.route("/api/v1/cache", methods=["GET"])
-    def list_cache():
-        limit = request.args.get("limit", 20, type=int)
-        return jsonify({"items": [], "limit": limit})
 
-    @app.route("/api/v1/cache/<key>", methods=["GET"])
-    def get_cache(key):
-        return jsonify({"error": "not found"}), 404
+def _parse_hits(response: dict) -> List[dict]:
+    results = []
+    for hit in response.get("hits", {}).get("hits", []):
+        item = hit["_source"]
+        item["_score"] = hit["_score"]
+        item["_id"] = hit["_id"]
+        if "highlight" in hit:
+            item["_highlight"] = hit["highlight"]
+        results.append(item)
+    return results
 
-    @app.route("/api/v1/cache", methods=["POST"])
-    def create_cache():
-        data = request.get_json(silent=True) or {}
-        if not data.get("name"):
-            return jsonify({"error": "name is required"}), 400
-        return jsonify({"name": data["name"], "value": data.get("value")}), 201
 
-    @app.route("/api/v1/search", methods=["GET"])
-    def search_products():
-        query = request.args.get("q", "")
-        limit = request.args.get("limit", 20, type=int)
-        offset = request.args.get("offset", 0, type=int)
+@app.route("/search")
+def search():
+    client_ip = _get_client_ip()
+    allowed, retry_after = rate_limiter.is_allowed(client_ip)
+    if not allowed:
+        resp = jsonify({"error": "Rate limit exceeded", "retry_after": retry_after})
+        resp.status_code = 429
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
 
-        if not query:
-            return jsonify({"error": "q parameter required"}), 400
+    error, params = validate_search_params(request.args)
+    if error:
+        return jsonify({"error": error}), 400
 
-        skip_cache = request.headers.get("Cache-Control") == "no-cache"
+    q = params["q"]
+    limit = params["limit"]
+    offset = params["offset"]
 
-        if not skip_cache:
-            cached = _query_cache.get(query, limit, offset)
-            if cached is not None:
-                return jsonify(cached)
+    cached = cache.get(q, limit, offset)
+    if cached is not None:
+        return jsonify(cached)
 
-        es = _get_es()
-        body = {
-            "query": {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["name^3", "description", "category^2", "brand^2"],
-                    "type": "best_fields",
-                    "fuzziness": "AUTO",
-                }
-            },
-            "from": offset,
-            "size": min(limit, 100),
-        }
+    es = ESClientManager.get_instance().client
+    body = _build_es_query(q, limit, offset)
+    raw = es.search(index=INDEX_NAME, body=body)
 
-        result = es.search(index="products", body=body)
-        hits = result.get("hits", {})
-        response_data = {
-            "total": hits.get("total", {}).get("value", 0),
-            "items": [h["_source"] for h in hits.get("hits", [])],
-        }
+    total = raw["hits"]["total"]["value"]
+    results = _parse_hits(raw)
 
-        if not skip_cache:
-            _query_cache.put(query, limit, offset, response_data)
+    payload = {
+        "query": q,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "results": results,
+    }
+    cache.put(q, limit, offset, payload)
+    return jsonify(payload)
 
-        return jsonify(response_data)
 
-    @app.route("/api/v1/search/cache/stats", methods=["GET"])
-    def cache_stats():
-        return jsonify(_query_cache.stats)
+@app.route("/health")
+def health():
+    es = ESClientManager.get_instance().client
+    if es.ping():
+        return jsonify({"status": "healthy", "cache": cache.stats})
+    return jsonify({"status": "unhealthy"}), 503
 
-    return app
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
