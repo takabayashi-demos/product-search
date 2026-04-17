@@ -4,12 +4,13 @@ import time
 import hashlib
 import json
 import logging
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, g
 from elasticsearch import Elasticsearch, helpers
 
 logger = logging.getLogger(__name__)
@@ -85,9 +86,11 @@ class ESClientManager:
                         sniff_on_start=self._config.sniff_on_start,
                     )
                     logger.info(
-                        "ES client initialized: pool_maxsize=%d, timeout=%ds",
-                        self._config.pool_maxsize,
-                        self._config.timeout,
+                        "ES client initialized",
+                        extra={
+                            "pool_maxsize": self._config.pool_maxsize,
+                            "timeout": self._config.timeout,
+                        },
                     )
         return self._client
 
@@ -160,6 +163,26 @@ es_manager = ESClientManager.get_instance()
 query_cache = QueryCache()
 
 
+@app.before_request
+def before_request():
+    """Attach correlation ID to request context."""
+    g.correlation_id = request.headers.get("X-Correlation-ID", str(uuid.uuid4()))
+
+
+def log_info(message: str, **kwargs):
+    """Log info with correlation ID."""
+    logger.info(message, extra={"correlation_id": getattr(g, "correlation_id", "unknown"), **kwargs})
+
+
+def log_error(message: str, exc_info=False, **kwargs):
+    """Log error with correlation ID."""
+    logger.error(
+        message,
+        exc_info=exc_info,
+        extra={"correlation_id": getattr(g, "correlation_id", "unknown"), **kwargs},
+    )
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint with cache statistics."""
@@ -167,7 +190,7 @@ def health():
         es_manager.client.info()
         es_status = "up"
     except Exception as e:
-        logger.error("ES health check failed: %s", str(e))
+        log_error("ES health check failed", exc_info=False, error=str(e))
         es_status = "down"
     
     return jsonify({
@@ -182,17 +205,19 @@ def search():
     """Search products via Elasticsearch."""
     query = request.args.get("q", "").strip()
     if not query:
+        log_info("Search request missing query parameter")
         return jsonify({"error": "Missing query parameter 'q'"}), 400
     
     try:
         limit = min(int(request.args.get("limit", SEARCH_DEFAULT_LIMIT)), SEARCH_MAX_LIMIT)
         offset = int(request.args.get("offset", SEARCH_DEFAULT_OFFSET))
     except ValueError:
+        log_info("Invalid limit or offset in search request", query=query)
         return jsonify({"error": "Invalid limit or offset"}), 400
     
     cached = query_cache.get(query, limit, offset)
     if cached:
-        logger.info("Cache hit for query: %s", query)
+        log_info("Cache hit", query=query, limit=limit, offset=offset)
         return jsonify(cached)
     
     try:
@@ -208,6 +233,7 @@ def search():
             "size": limit,
         }
         
+        log_info("Executing ES query", query=query, limit=limit, offset=offset)
         response = es_manager.client.search(index="products", body=es_query)
         results = {
             "query": query,
@@ -223,17 +249,24 @@ def search():
         }
         
         query_cache.put(query, limit, offset, results)
-        logger.info("ES query executed: query=%s, results=%d", query, len(results["results"]))
+        log_info(
+            "Search completed",
+            query=query,
+            total=results["total"],
+            returned=len(results["results"]),
+            limit=limit,
+            offset=offset,
+        )
         return jsonify(results)
     
     except Exception as e:
-        logger.error("Search failed: %s", str(e), exc_info=True)
+        log_error("Search failed", exc_info=True, query=query, error=str(e))
         return jsonify({"error": "Search failed"}), 500
 
 
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        format="%(asctime)s [%(levelname)s] %(name)s [%(correlation_id)s]: %(message)s",
     )
     app.run(host="0.0.0.0", port=8080)
