@@ -24,21 +24,36 @@ def health():
 @app.route('/api/v1/search', methods=['GET'])
 def search():
     query = request.args.get('q', '').lower()
+    category = request.args.get('category', '').lower()
+    sort = request.args.get('sort', '')
     limit = min(int(request.args.get('limit', 20)), 100)
     offset = int(request.args.get('offset', 0))
 
     if not query:
         return jsonify({'error': 'q parameter required'}), 400
 
-    # Simple search filter
+    # Search filter
     results = [p for p in products if query in p['name'].lower() or query in p['category'].lower()]
+
+    # Category filter
+    if category:
+        results = [p for p in results if p['category'].lower() == category]
+
+    # Sorting
+    if sort == 'price_asc':
+        results.sort(key=lambda p: p['price'])
+    elif sort == 'price_desc':
+        results.sort(key=lambda p: p['price'], reverse=True)
+    elif sort == 'name':
+        results.sort(key=lambda p: p['name'].lower())
 
     paginated = results[offset:offset + limit]
 
     return jsonify({
         'total': len(results),
         'items': paginated,
-        'query': query
+        'query': query,
+        'filters': {'category': category} if category else {}
     })
 
 @app.route('/api/v1/products', methods=['GET'])
