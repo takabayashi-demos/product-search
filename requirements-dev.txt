@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest==7.4.3
+pytest-cov==4.1.0
+flake8==6.1.0
+bandit==1.7.5
+black==23.12.0
