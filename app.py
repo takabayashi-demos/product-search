@@ -26,12 +26,29 @@ def search():
     query = request.args.get('q', '').lower()
     limit = min(int(request.args.get('limit', 20)), 100)
     offset = int(request.args.get('offset', 0))
+    min_price = request.args.get('min_price')
+    max_price = request.args.get('max_price')
 
     if not query:
         return jsonify({'error': 'q parameter required'}), 400
 
     # Simple search filter
     results = [p for p in products if query in p['name'].lower() or query in p['category'].lower()]
+
+    # Apply price range filters
+    if min_price is not None:
+        try:
+            min_price = float(min_price)
+            results = [p for p in results if p['price'] >= min_price]
+        except ValueError:
+            return jsonify({'error': 'min_price must be a valid number'}), 400
+
+    if max_price is not None:
+        try:
+            max_price = float(max_price)
+            results = [p for p in results if p['price'] <= max_price]
+        except ValueError:
+            return jsonify({'error': 'max_price must be a valid number'}), 400
 
     paginated = results[offset:offset + limit]
 
