@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
@@ -112,141 +113,128 @@ class QueryCache:
         key = self._make_key(query, limit, offset)
         with self._lock:
             if key in self._cache:
-                self._cache.move_to_end(key)
-                self._cache[key] = (time.monotonic(), value)
-            else:
-                if len(self._cache) >= self._max_size:
-                    self._cache.popitem(last=False)
-                self._cache[key] = (time.monotonic(), value)
+                del self._cache[key]
+            elif len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+            self._cache[key] = (time.monotonic(), value)
 
-    def clear(self) -> None:
-        with self._lock:
-            self._cache.clear()
-            self._hits = 0
-            self._misses = 0
-
-    @property
-    def stats(self) -> dict:
+    def stats(self) -> Dict[str, int]:
         with self._lock:
             total = self._hits + self._misses
+            hit_rate = (self._hits / total * 100) if total > 0 else 0
             return {
-                "size": len(self._cache),
-                "max_size": self._max_size,
-                "ttl_seconds": self._ttl,
                 "hits": self._hits,
                 "misses": self._misses,
-                "hit_rate": round(self._hits / total, 4) if total > 0 else 0.0,
+                "size": len(self._cache),
+                "hit_rate_pct": round(hit_rate, 2),
             }
 
 
-@dataclass
-class AutocompleteConfig:
-    """Configuration for autocomplete feature."""
-    enabled: bool = True
-    timeout_ms: int = int(os.getenv("PRODUCT_SEARCH_TIMEOUT", "5000"))
-    max_retries: int = 3
-    batch_size: int = 100
-    cache_ttl_seconds: int = 300
-    allowed_regions: List[str] = field(
-        default_factory=lambda: ["us-east-1", "us-west-2", "eu-west-1"]
-    )
-
-    def validate(self) -> bool:
-        """Validate configuration values."""
-        if self.timeout_ms < 100:
-            return False
-        if self.batch_size < 1:
-            return False
-        return True
-
-
-@dataclass
-class PersonalizedrankingConfig:
-    """Configuration for personalized ranking feature."""
-    enabled: bool = True
-
-
-_query_cache = QueryCache(
-    max_size=int(os.getenv("SEARCH_CACHE_MAX_SIZE", "2000")),
-    ttl_seconds=int(os.getenv("SEARCH_CACHE_TTL", "30")),
+app = Flask(__name__)
+es_manager = ESClientManager.get_instance()
+query_cache = QueryCache(
+    max_size=int(os.getenv("CACHE_SIZE", "1000")),
+    ttl_seconds=int(os.getenv("CACHE_TTL", "60")),
 )
 
-
-def _get_es() -> Elasticsearch:
-    """Get the shared ES client from the pool manager."""
-    return ESClientManager.get_instance().client
+MAX_BULK_QUERIES = int(os.getenv("MAX_BULK_QUERIES", "10"))
+BULK_THREAD_POOL_SIZE = int(os.getenv("BULK_THREAD_POOL_SIZE", "5"))
 
 
-def create_app(es_config: Optional[ESPoolConfig] = None) -> Flask:
-    """Application factory."""
-    app = Flask(__name__)
+def _execute_search(query: str, limit: int = 20, offset: int = 0) -> dict:
+    """Execute a single search query with caching."""
+    cached = query_cache.get(query, limit, offset)
+    if cached is not None:
+        return cached
 
-    ESClientManager.get_instance(es_config)
+    es_client = es_manager.client
+    body = {
+        "query": {"multi_match": {"query": query, "fields": ["name^3", "description", "category"]}},
+        "from": offset,
+        "size": limit,
+    }
+    
+    response = es_client.search(index="products", body=body)
+    results = {
+        "total": response["hits"]["total"]["value"],
+        "items": [{"id": hit["_id"], **hit["_source"]} for hit in response["hits"]["hits"]],
+    }
+    
+    query_cache.put(query, limit, offset, results)
+    return results
 
-    @app.route("/health")
-    def health():
-        return jsonify({"status": "UP"})
 
-    @app.route("/api/v1/cache", methods=["GET"])
-    def list_cache():
-        limit = request.args.get("limit", 20, type=int)
-        return jsonify({"items": [], "limit": limit})
+@app.route("/api/v1/search", methods=["GET"])
+def search():
+    query = request.args.get("q", "").strip()
+    if not query:
+        return jsonify({"error": "query parameter 'q' is required"}), 400
 
-    @app.route("/api/v1/cache/<key>", methods=["GET"])
-    def get_cache(key):
-        return jsonify({"error": "not found"}), 404
+    limit = min(int(request.args.get("limit", 20)), 100)
+    offset = int(request.args.get("offset", 0))
 
-    @app.route("/api/v1/cache", methods=["POST"])
-    def create_cache():
-        data = request.get_json(silent=True) or {}
-        if not data.get("name"):
-            return jsonify({"error": "name is required"}), 400
-        return jsonify({"name": data["name"], "value": data.get("value")}), 201
+    try:
+        results = _execute_search(query, limit, offset)
+        return jsonify(results)
+    except Exception as e:
+        logger.error("Search failed: %s", e, exc_info=True)
+        return jsonify({"error": "search failed"}), 500
 
-    @app.route("/api/v1/search", methods=["GET"])
-    def search_products():
-        query = request.args.get("q", "")
-        limit = request.args.get("limit", 20, type=int)
-        offset = request.args.get("offset", 0, type=int)
 
-        if not query:
-            return jsonify({"error": "q parameter required"}), 400
+@app.route("/api/v1/bulk-search", methods=["POST"])
+def bulk_search():
+    """Execute multiple search queries concurrently."""
+    data = request.get_json()
+    if not data or "queries" not in data:
+        return jsonify({"error": "request body must contain 'queries' array"}), 400
 
-        skip_cache = request.headers.get("Cache-Control") == "no-cache"
+    queries = data["queries"]
+    if not isinstance(queries, list) or len(queries) == 0:
+        return jsonify({"error": "queries must be a non-empty array"}), 400
 
-        if not skip_cache:
-            cached = _query_cache.get(query, limit, offset)
-            if cached is not None:
-                return jsonify(cached)
+    if len(queries) > MAX_BULK_QUERIES:
+        return jsonify({"error": f"maximum {MAX_BULK_QUERIES} queries allowed"}), 400
 
-        es = _get_es()
-        body = {
-            "query": {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["name^3", "description", "category^2", "brand^2"],
-                    "type": "best_fields",
-                    "fuzziness": "AUTO",
-                }
-            },
-            "from": offset,
-            "size": min(limit, 100),
-        }
+    results = []
+    with ThreadPoolExecutor(max_workers=BULK_THREAD_POOL_SIZE) as executor:
+        futures = {}
+        for idx, q in enumerate(queries):
+            if not isinstance(q, dict) or "q" not in q:
+                results.append({"index": idx, "error": "invalid query format"})
+                continue
+            
+            query_str = q["q"].strip()
+            if not query_str:
+                results.append({"index": idx, "error": "query cannot be empty"})
+                continue
 
-        result = es.search(index="products", body=body)
-        hits = result.get("hits", {})
-        response_data = {
-            "total": hits.get("total", {}).get("value", 0),
-            "items": [h["_source"] for h in hits.get("hits", [])],
-        }
+            limit = min(int(q.get("limit", 20)), 100)
+            offset = int(q.get("offset", 0))
+            
+            future = executor.submit(_execute_search, query_str, limit, offset)
+            futures[future] = idx
 
-        if not skip_cache:
-            _query_cache.put(query, limit, offset, response_data)
+        for future in as_completed(futures):
+            idx = futures[future]
+            try:
+                result = future.result()
+                results.append({"index": idx, "data": result})
+            except Exception as e:
+                logger.error("Bulk query %d failed: %s", idx, e)
+                results.append({"index": idx, "error": str(e)})
 
-        return jsonify(response_data)
+    results.sort(key=lambda x: x["index"])
+    return jsonify({"results": results})
 
-    @app.route("/api/v1/search/cache/stats", methods=["GET"])
-    def cache_stats():
-        return jsonify(_query_cache.stats)
 
-    return app
+@app.route("/health", methods=["GET"])
+def health():
+    try:
+        es_manager.client.ping()
+        return jsonify({"status": "healthy", "cache": query_cache.stats()})
+    except Exception:
+        return jsonify({"status": "unhealthy"}), 503
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
