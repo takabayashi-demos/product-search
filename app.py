@@ -2,11 +2,21 @@
 import os
 import logging
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Initialize rate limiter
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per hour"],
+    storage_uri="memory://",
+)
 
 # In-memory product data
 products = [
@@ -22,6 +32,7 @@ def health():
     return jsonify({'status': 'UP', 'service': 'product-search'})
 
 @app.route('/api/v1/search', methods=['GET'])
+@limiter.limit("30 per minute")
 def search():
     query = request.args.get('q', '').lower()
     limit = min(int(request.args.get('limit', 20)), 100)
@@ -42,6 +53,7 @@ def search():
     })
 
 @app.route('/api/v1/products', methods=['GET'])
+@limiter.limit("60 per minute")
 def get_products():
     limit = min(int(request.args.get('limit', 50)), 200)
     offset = int(request.args.get('offset', 0))
