@@ -17,6 +17,19 @@ products = [
     {"id": 5, "name": "Mouse", "category": "Accessories", "price": 49.99},
 ]
 
+def get_int_param(param_name, default, max_value=None):
+    """Safely parse integer query parameter with validation."""
+    value = request.args.get(param_name, str(default))
+    try:
+        parsed = int(value)
+        if parsed < 0:
+            raise ValueError(f"{param_name} must be non-negative")
+        if max_value and parsed > max_value:
+            return max_value
+        return parsed
+    except ValueError as e:
+        raise ValueError(f"Invalid {param_name}: {value}") from e
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'UP', 'service': 'product-search'})
@@ -24,11 +37,15 @@ def health():
 @app.route('/api/v1/search', methods=['GET'])
 def search():
     query = request.args.get('q', '').lower()
-    limit = min(int(request.args.get('limit', 20)), 100)
-    offset = int(request.args.get('offset', 0))
 
     if not query:
         return jsonify({'error': 'q parameter required'}), 400
+
+    try:
+        limit = get_int_param('limit', 20, max_value=100)
+        offset = get_int_param('offset', 0)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     # Simple search filter
     results = [p for p in products if query in p['name'].lower() or query in p['category'].lower()]
@@ -43,8 +60,11 @@ def search():
 
 @app.route('/api/v1/products', methods=['GET'])
 def get_products():
-    limit = min(int(request.args.get('limit', 50)), 200)
-    offset = int(request.args.get('offset', 0))
+    try:
+        limit = get_int_param('limit', 50, max_value=200)
+        offset = get_int_param('offset', 0)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
 
     paginated = products[offset:offset + limit]
 
