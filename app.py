@@ -86,6 +86,7 @@ class QueryCache:
         self._lock = Lock()
         self._hits = 0
         self._misses = 0
+        self._evictions = 0
 
     @staticmethod
     def _make_key(query: str, limit: int, offset: int) -> str:
@@ -112,141 +113,25 @@ class QueryCache:
         key = self._make_key(query, limit, offset)
         with self._lock:
             if key in self._cache:
-                self._cache.move_to_end(key)
-                self._cache[key] = (time.monotonic(), value)
-            else:
-                if len(self._cache) >= self._max_size:
-                    self._cache.popitem(last=False)
-                self._cache[key] = (time.monotonic(), value)
+                del self._cache[key]
+            elif len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+                self._evictions += 1
+            self._cache[key] = (time.monotonic(), value)
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {
+                "hits": self._hits,
+                "misses": self._misses,
+                "evictions": self._evictions,
+                "size": len(self._cache),
+                "max_size": self._max_size,
+            }
 
     def clear(self) -> None:
         with self._lock:
             self._cache.clear()
             self._hits = 0
             self._misses = 0
-
-    @property
-    def stats(self) -> dict:
-        with self._lock:
-            total = self._hits + self._misses
-            return {
-                "size": len(self._cache),
-                "max_size": self._max_size,
-                "ttl_seconds": self._ttl,
-                "hits": self._hits,
-                "misses": self._misses,
-                "hit_rate": round(self._hits / total, 4) if total > 0 else 0.0,
-            }
-
-
-@dataclass
-class AutocompleteConfig:
-    """Configuration for autocomplete feature."""
-    enabled: bool = True
-    timeout_ms: int = int(os.getenv("PRODUCT_SEARCH_TIMEOUT", "5000"))
-    max_retries: int = 3
-    batch_size: int = 100
-    cache_ttl_seconds: int = 300
-    allowed_regions: List[str] = field(
-        default_factory=lambda: ["us-east-1", "us-west-2", "eu-west-1"]
-    )
-
-    def validate(self) -> bool:
-        """Validate configuration values."""
-        if self.timeout_ms < 100:
-            return False
-        if self.batch_size < 1:
-            return False
-        return True
-
-
-@dataclass
-class PersonalizedrankingConfig:
-    """Configuration for personalized ranking feature."""
-    enabled: bool = True
-
-
-_query_cache = QueryCache(
-    max_size=int(os.getenv("SEARCH_CACHE_MAX_SIZE", "2000")),
-    ttl_seconds=int(os.getenv("SEARCH_CACHE_TTL", "30")),
-)
-
-
-def _get_es() -> Elasticsearch:
-    """Get the shared ES client from the pool manager."""
-    return ESClientManager.get_instance().client
-
-
-def create_app(es_config: Optional[ESPoolConfig] = None) -> Flask:
-    """Application factory."""
-    app = Flask(__name__)
-
-    ESClientManager.get_instance(es_config)
-
-    @app.route("/health")
-    def health():
-        return jsonify({"status": "UP"})
-
-    @app.route("/api/v1/cache", methods=["GET"])
-    def list_cache():
-        limit = request.args.get("limit", 20, type=int)
-        return jsonify({"items": [], "limit": limit})
-
-    @app.route("/api/v1/cache/<key>", methods=["GET"])
-    def get_cache(key):
-        return jsonify({"error": "not found"}), 404
-
-    @app.route("/api/v1/cache", methods=["POST"])
-    def create_cache():
-        data = request.get_json(silent=True) or {}
-        if not data.get("name"):
-            return jsonify({"error": "name is required"}), 400
-        return jsonify({"name": data["name"], "value": data.get("value")}), 201
-
-    @app.route("/api/v1/search", methods=["GET"])
-    def search_products():
-        query = request.args.get("q", "")
-        limit = request.args.get("limit", 20, type=int)
-        offset = request.args.get("offset", 0, type=int)
-
-        if not query:
-            return jsonify({"error": "q parameter required"}), 400
-
-        skip_cache = request.headers.get("Cache-Control") == "no-cache"
-
-        if not skip_cache:
-            cached = _query_cache.get(query, limit, offset)
-            if cached is not None:
-                return jsonify(cached)
-
-        es = _get_es()
-        body = {
-            "query": {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["name^3", "description", "category^2", "brand^2"],
-                    "type": "best_fields",
-                    "fuzziness": "AUTO",
-                }
-            },
-            "from": offset,
-            "size": min(limit, 100),
-        }
-
-        result = es.search(index="products", body=body)
-        hits = result.get("hits", {})
-        response_data = {
-            "total": hits.get("total", {}).get("value", 0),
-            "items": [h["_source"] for h in hits.get("hits", [])],
-        }
-
-        if not skip_cache:
-            _query_cache.put(query, limit, offset, response_data)
-
-        return jsonify(response_data)
-
-    @app.route("/api/v1/search/cache/stats", methods=["GET"])
-    def cache_stats():
-        return jsonify(_query_cache.stats)
-
-    return app
+            self._evictions = 0
