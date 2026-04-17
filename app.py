@@ -1,12 +1,23 @@
 """Product search microservice."""
 import os
 import logging
+import re
 from flask import Flask, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Rate limiting configuration
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["100 per minute"],
+    storage_uri="memory://"
+)
 
 # In-memory product data
 products = [
@@ -18,33 +29,56 @@ products = [
 ]
 
 @app.route('/health', methods=['GET'])
+@limiter.exempt
 def health():
     return jsonify({'status': 'UP', 'service': 'product-search'})
 
 @app.route('/api/v1/search', methods=['GET'])
+@limiter.limit("50 per minute")
 def search():
-    query = request.args.get('q', '').lower()
-    limit = min(int(request.args.get('limit', 20)), 100)
-    offset = int(request.args.get('offset', 0))
-
+    query = request.args.get('q', '').strip()
+    
     if not query:
         return jsonify({'error': 'q parameter required'}), 400
+    
+    # Validate and sanitize query
+    if len(query) > 100:
+        return jsonify({'error': 'Query too long (max 100 characters)'}), 400
+    
+    # Remove potentially dangerous characters
+    sanitized_query = re.sub(r'[<>"\';]', '', query).lower()
+    
+    try:
+        limit = min(int(request.args.get('limit', 20)), 100)
+        offset = int(request.args.get('offset', 0))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid limit or offset parameter'}), 400
+    
+    if offset < 0 or limit < 0:
+        return jsonify({'error': 'Limit and offset must be non-negative'}), 400
 
     # Simple search filter
-    results = [p for p in products if query in p['name'].lower() or query in p['category'].lower()]
+    results = [p for p in products if sanitized_query in p['name'].lower() or sanitized_query in p['category'].lower()]
 
     paginated = results[offset:offset + limit]
 
     return jsonify({
         'total': len(results),
         'items': paginated,
-        'query': query
+        'query': sanitized_query
     })
 
 @app.route('/api/v1/products', methods=['GET'])
+@limiter.limit("50 per minute")
 def get_products():
-    limit = min(int(request.args.get('limit', 50)), 200)
-    offset = int(request.args.get('offset', 0))
+    try:
+        limit = min(int(request.args.get('limit', 50)), 200)
+        offset = int(request.args.get('offset', 0))
+    except (ValueError, TypeError):
+        return jsonify({'error': 'Invalid limit or offset parameter'}), 400
+    
+    if offset < 0 or limit < 0:
+        return jsonify({'error': 'Limit and offset must be non-negative'}), 400
 
     paginated = products[offset:offset + limit]
 
@@ -52,6 +86,11 @@ def get_products():
         'products': paginated,
         'total': len(products)
     })
+
+@app.errorhandler(429)
+def ratelimit_handler(e):
+    logger.warning(f'Rate limit exceeded: {get_remote_address()}')
+    return jsonify({'error': 'Rate limit exceeded. Please try again later.'}), 429
 
 @app.errorhandler(Exception)
 def handle_error(e):
