@@ -53,6 +53,15 @@ def get_products():
         'total': len(products)
     })
 
+@app.route('/api/v1/products/<int:product_id>', methods=['GET'])
+def get_product(product_id):
+    product = next((p for p in products if p['id'] == product_id), None)
+    
+    if not product:
+        return jsonify({'error': 'Product not found'}), 404
+    
+    return jsonify(product)
+
 @app.errorhandler(Exception)
 def handle_error(e):
     logger.error(f'Unhandled error: {e}')
