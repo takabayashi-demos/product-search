@@ -250,3 +250,9 @@ def create_app(es_config: Optional[ESPoolConfig] = None) -> Flask:
         return jsonify(_query_cache.stats)
 
     return app
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app = create_app()
+    app.run(host="0.0.0.0", port=port)
